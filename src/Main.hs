@@ -9,6 +9,7 @@ import Data.Attoparsec.ByteString.Lazy
 import qualified Data.Binary.Get as BG
 import qualified Data.ByteString.Char8 as BS
 import qualified Data.ByteString.Lazy as BL
+import qualified Data.Map.Strict as Map
 import Data.Word
 import Data.Maybe
 
@@ -16,6 +17,8 @@ import Control.Applicative
 
 import System.IO
 
+import Data.Parquet.Internal.Encodings
+import Data.Parquet.Internal.Enums
 import Data.Parquet.Internal.DataPageTypes
 import Data.Parquet.Internal.FileMetadataTypes
 import Data.Parquet.Internal.Thrift.CompactProtocol
@@ -85,16 +88,55 @@ readFileMetadata file = do
   !parsed <- runParserUntilResult file useThriftParser
   return parsed
 
-readRowGroup :: Handle -> RowGroup -> IO ()
-readRowGroup file rg = do
+readRowGroup :: Handle -> Schema -> RowGroup -> IO ()
+readRowGroup file schema rg = do
   print "================="
   print "Reading row group"
   columns <- return $ concat (maybeToList (rgColumns rg))
-  sequence (map (readColumnChunk file) columns)
+  sequence (map (readColumnChunk file schema) columns)
   print "================="
 
-readColumnChunk :: Handle -> ColumnChunk -> IO ()
-readColumnChunk file columnChunk = do
+type Schema = Map.Map BS.ByteString SchemaElement
+
+constructSchema :: [SchemaElement] -> Schema
+constructSchema els = Map.fromList [((BL.toStrict (seName se )), se) | se <- els]
+
+isColumnRequired :: Schema -> ColumnMetaData -> Bool
+isColumnRequired schema columnMetadata =
+  required $ seRepetitionType (schema Map.! (BL.toStrict (last (maybe [] id (cmdPathInSchema columnMetadata)))))
+    where required (Just REQUIRED) = True
+          required (Just _)        = False
+          required Nothing         = True
+
+maxDefinitionLevel :: Schema -> [BL.ByteString] -> Int
+maxDefinitionLevel _ [] = 0
+maxDefinitionLevel schema (x : xs) =
+  (maxDefinitionLevel schema xs) + (required (seRepetitionType (schema Map.! (BL.toStrict x))))
+  where required (Just REQUIRED) = 1
+        required (Just _)        = 0
+        required Nothing         = 1
+
+
+maxRepetitionLevel :: Schema -> [BL.ByteString] -> Int
+maxRepetitionLevel _ [] = 0
+maxRepetitionLevel schema (x : xs) =
+  (maxRepetitionLevel schema xs) + (required (seRepetitionType (schema Map.! (BL.toStrict x))))
+  where required (Just REQUIRED) = 0
+        required (Just _)        = 1
+        required Nothing         = 0
+
+readDefinitionLevels :: Handle -> Schema -> ColumnMetaData -> IO ()
+readDefinitionLevels file schema columnMetadata = do
+  if (isColumnRequired schema columnMetadata) then (print "Skipping definition levels") else readLevels
+  where readLevels = do
+          !definitionLength <- runHandle file BG.getWord32le
+          print $ "Definition length: " ++ (show definitionLength)
+          bitWidth <- return $ widthFromMaxInt (maxDefinitionLevel schema (maybe [] id (cmdPathInSchema columnMetadata)))
+          !levels <- coerceEither <$> (runParserUntilResult file (readRLEBitPackingHybrid bitWidth))
+          print $ (show levels)
+
+readColumnChunk :: Handle -> Schema -> ColumnChunk -> IO ()
+readColumnChunk file schema columnChunk = do
   columnMetadata <- return $ coerceMaybe (ccMetadata columnChunk)
   print "------"
   print (show columnChunk)
@@ -105,9 +147,7 @@ readColumnChunk file columnChunk = do
   print (show pageHeader)
   --
   print "Reading Definition Levels"
-  !definitionLength <- runHandle file BG.getWord32le
-  print $ "Definition length: " ++ (show definitionLength)
-  skipBytes file (fromIntegral definitionLength)
+  readDefinitionLevels file schema columnMetadata
   --
   print "Reading Repetition Levels"
   !repetitionLength <- runHandle file BG.getWord32le
@@ -123,14 +163,15 @@ skipBytes file count = hSeek file RelativeSeek count
 
 readDataPage :: Handle -> FileMetadata -> IO ()
 readDataPage file fm = do
-  sequence $ map (readRowGroup file) (fmRowGroups fm)
+  sequence $ map (readRowGroup file (constructSchema (fmSchema fm))) (fmRowGroups fm)
   return ()
 
 coerceMaybe :: Maybe a -> a
 coerceMaybe (Just a) = a
 
-coerceEither :: Either a b -> b
+coerceEither :: Show a => Either a b -> b
 coerceEither (Right b) = b
+coerceEither (Left a) = error (show a)
 
 main = do
   handle   <- openFile "customer.impala.parquet" ReadMode

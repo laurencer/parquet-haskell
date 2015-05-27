@@ -7,7 +7,7 @@ module Data.Parquet.Internal.Enums(
   , PageType
   , CompressionCodec
   , Encoding
-  , FieldRepetitionType
+  , FieldRepetitionType(..)
 ) where
 
 import Control.Applicative

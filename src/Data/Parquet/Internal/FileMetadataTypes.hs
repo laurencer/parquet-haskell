@@ -16,7 +16,7 @@ module Data.Parquet.Internal.FileMetadataTypes(
   , CompressionCodec
   , Encoding
   , FieldRepetitionType
-  , SchemaElement
+  , SchemaElement(..)
 ) where
 
 import Control.Applicative
@@ -54,7 +54,7 @@ data SchemaElement = SchemaElement {
   seType :: Maybe ParquetType,
   seTypeLength :: Maybe Int,
   seRepetitionType :: Maybe FieldRepetitionType,
-  seName :: Maybe LBS.ByteString,
+  seName :: LBS.ByteString,
   seChildCount :: Maybe Int,
   seConvertedType :: Maybe ConvertedType,
   seScale :: Maybe Int,
@@ -68,7 +68,7 @@ instance ThriftParseable SchemaElement where
     seType            <- (readField p 1) >>= asMaybeEnum
     seTypeLength      <- (readField p 2) >>= asMaybeParseThrift
     seRepetitionType  <- (readField p 3) >>= asMaybeEnum
-    seName            <- (readField p 4) >>= asMaybeParseThrift
+    seName            <- (readField p 4) >>= required >>= parseThrift
     seChildCount      <- (readField p 5) >>= asMaybeParseThrift
     seConvertedType   <- (readField p 6) >>= asMaybeEnum
     seScale           <- (readField p 7) >>= asMaybeParseThrift
