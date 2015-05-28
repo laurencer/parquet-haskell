@@ -69,30 +69,40 @@ readRLE header bitWidth = do
 
 -- | Parser for a Hybrid BitPacked Header
 --   >>> parseOnly (readBitPacked 9 5) (BSC.pack "\x20\x88\x41\x8a\x39\x28\xa9\xc5\x9a\x7b\x30\xca\x49\xab\xbd\x18")
---   Done "" [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]
+--   Right "[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24]"
 --
 readBitPacked :: Header -> BitWidth -> Parser BS.ByteString
 readBitPacked header width = do
-  rawBytes  <- takeByteString -- byteCount
-  return $ BSC.pack $ show $ process (bits rawBytes)
+  rawBytes  <- takeByteString -- take byteCount
+  return $ BSC.pack $ show $ process rawBytes
   where groupsCount = (header `shiftR` 1)
         byteCount :: Int
         byteCount = width * groupsCount
-        bits :: BS.ByteString -> BV.BitVector
-        bits bs = BV.fromBits $ BS.foldr' (\el acc -> (BV.toBits (BV.bitVec 8 el)) ++ acc) [] bs 
-        -- total number of bits read
-        bitCount = byteCount * 8
-        -- positions where new data starts
-        bitDividers :: Int -> [Int]
-        bitDividers totalBits = [0,width..totalBits]
-        -- ranges where we have bits.
-        process :: BV.BitVector -> [Integer]
-        process bs = map extract bitRanges
-          where extract :: (Int, Int) -> Integer
-                extract (start, end) = BV.nat (bs BV.@@ (size' - start, size' - end + 1))
-                size' = BV.size bs
-                dividers = bitDividers size'
-                bitRanges = zip dividers ((\x -> x - 1) <$> tail dividers)
+        process :: BS.ByteString -> [Int64]
+        process bs = reverse $ snd $ BS.foldl' extract initial bs
+          where emptyBV = BV.bitVec 0 0
+                initial = ((BV.bitVec 0 0), [])
+                extract :: (BV.BitVector, [Int64]) -> Word8 -> (BV.BitVector, [Int64])
+                extract (carry, acc) nextWord = if (BV.size combined) < width 
+                    then (combined, acc)
+                    else getAll (combined, acc)
+                  where next :: BV.BitVector
+                        next = BV.bitVec 8 nextWord
+                        combined = BV.cat next carry
+                        -- the integer of width at the start.
+                        takeInt :: BV.BitVector -> Int64
+                        takeInt bv = fromIntegral $ BV.nat $ bv BV.@@ (width - 1, 0)
+                        -- amount to shift the words by once an int is taken.
+                        shiftAmount = (BV.bitVec width width)
+                        -- the shifted result (if the int was taken).
+                        shifted bv = if (BV.size bv) <= width then emptyBV else bv BV.@@ ((BV.size bv) - 1, width)
+                        getAll :: (BV.BitVector, [Int64]) -> (BV.BitVector, [Int64])
+                        getAll (current, acc) = 
+                          if (BV.size current) < width
+                            then (current, acc)
+                            else getAll ((shifted current), (takeInt current) : acc)
+
+
 
 
 -- Helpers
