@@ -24,6 +24,7 @@ import qualified Data.ByteString.Char8 as BSC
 import qualified Data.HashMap.Strict as Map
 import           Data.Int
 import           Data.Bits
+import           Data.Binary.Get
 import           Data.Binary.IEEE754
 import           Data.Word
 import qualified Data.BitVector as BV
@@ -43,15 +44,17 @@ type BitWidth = Int
 
 -- | First byte of the Hybrid encoding (used to determine whether it is RLE or bitpacked)
 type Header = Int
+type EncodedInt = Int96
 
+-- | Runs the subparser with a fixed amount of data.
 fixed :: Int -> Parser a -> Parser a
-fixed i p = do
-    intermediate <- take i
-    case parseOnly (p <* endOfInput) intermediate of
+fixed bytesToParse subparser = do
+    intermediate <- take bytesToParse
+    case parseOnly (subparser <* endOfInput) intermediate of
         Left _ -> empty
         Right x -> return x
 
-readRLEBitPackingHybrid :: BitWidth -> Parser [BS.ByteString]
+readRLEBitPackingHybrid :: BitWidth -> Parser [[EncodedInt]]
 readRLEBitPackingHybrid bitWidth = do
   length  <- fromIntegral <$> anyWord32le
   fixed length parser
@@ -60,29 +63,36 @@ readRLEBitPackingHybrid bitWidth = do
           header  <- readUnsignedVarInt
           if (header .&. 1) == 0 then (readRLE bitWidth header) else (readBitPacked bitWidth header)
 
-readRLE :: Header -> BitWidth -> Parser BS.ByteString
+-- | Parser for an Hybrid RLE value
+--   >>> parseOnly (readRLE 50 1) (BSC.pack "\x01")
+--   Right [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
+--
+readRLE :: Header -> BitWidth -> Parser [EncodedInt]
 readRLE header bitWidth = do
   count   <- return $ header `shiftR` 1
   width   <- return $ byteWidth bitWidth
   bytes   <- take width
-  return $ BS.append bytes (BS.replicate (4 - (BS.length bytes)) zeroBits)
+  padded  <- return $ BS.append bytes (BS.replicate (4 - (BS.length bytes)) zeroBits)
+  value   <- return $ runGet (getWord32le) (LBS.fromStrict padded)
+  return $ replicate count (fromIntegral value)
 
--- | Parser for a Hybrid BitPacked Header
+
+-- | Parser for a Hybrid BitPacked value
 --   >>> parseOnly (readBitPacked 9 5) (BSC.pack "\x20\x88\x41\x8a\x39\x28\xa9\xc5\x9a\x7b\x30\xca\x49\xab\xbd\x18")
---   Right "[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24]"
+--   Right [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24]
 --
-readBitPacked :: Header -> BitWidth -> Parser BS.ByteString
+readBitPacked :: Header -> BitWidth -> Parser [EncodedInt]
 readBitPacked header width = do
   rawBytes  <- takeByteString -- take byteCount
-  return $ BSC.pack $ show $ process rawBytes
+  return $ process rawBytes
   where groupsCount = (header `shiftR` 1)
         byteCount :: Int
         byteCount = width * groupsCount
-        process :: BS.ByteString -> [Int64]
+        process :: BS.ByteString -> [EncodedInt]
         process bs = reverse $ snd $ BS.foldl' extract initial bs
           where emptyBV = BV.bitVec 0 0
                 initial = ((BV.bitVec 0 0), [])
-                extract :: (BV.BitVector, [Int64]) -> Word8 -> (BV.BitVector, [Int64])
+                extract :: (BV.BitVector, [EncodedInt]) -> Word8 -> (BV.BitVector, [EncodedInt])
                 extract (carry, acc) nextWord = if (BV.size combined) < width 
                     then (combined, acc)
                     else getAll (combined, acc)
@@ -90,13 +100,13 @@ readBitPacked header width = do
                         next = BV.bitVec 8 nextWord
                         combined = BV.cat next carry
                         -- the integer of width at the start.
-                        takeInt :: BV.BitVector -> Int64
+                        takeInt :: BV.BitVector -> EncodedInt
                         takeInt bv = fromIntegral $ BV.nat $ bv BV.@@ (width - 1, 0)
                         -- amount to shift the words by once an int is taken.
                         shiftAmount = (BV.bitVec width width)
                         -- the shifted result (if the int was taken).
                         shifted bv = if (BV.size bv) <= width then emptyBV else bv BV.@@ ((BV.size bv) - 1, width)
-                        getAll :: (BV.BitVector, [Int64]) -> (BV.BitVector, [Int64])
+                        getAll :: (BV.BitVector, [EncodedInt]) -> (BV.BitVector, [EncodedInt])
                         getAll (current, acc) = 
                           if (BV.size current) < width
                             then (current, acc)
